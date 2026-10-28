@@ -194,12 +194,32 @@ if [ -f /etc/default/zramswap ]; then
   sed -i 's/^#\?PERCENT=.*/PERCENT=50/' /etc/default/zramswap
 fi
 
-# Set a friendly display-manager default.
+# Create a real live-session user after /etc/skel has been configured.
+# A kernel parameter alone does not reliably create a user on every live boot.
+if ! id -u avonix >/dev/null 2>&1; then
+  useradd --create-home --user-group --shell /bin/bash avonix
+fi
+for group in sudo audio video plugdev netdev; do
+  if getent group "$group" >/dev/null 2>&1; then
+    usermod -aG "$group" avonix
+  fi
+done
+# Set a documented fallback password; automatic login is enabled below for Live use.
+printf '%s\n' 'avonix:avonix' | chpasswd
+if [ -d /etc/skel ]; then
+  cp -an /etc/skel/. /home/avonix/
+fi
+chown -R avonix:avonix /home/avonix
+
+# Configure LightDM to enter the Avonix Openbox desktop automatically.
 mkdir -p /etc/lightdm/lightdm.conf.d
 cat > /etc/lightdm/lightdm.conf.d/20-avonix.conf <<'EOF'
 [Seat:*]
 user-session=openbox
 greeter-session=lightdm-gtk-greeter
+autologin-user=avonix
+autologin-user-timeout=0
+autologin-session=openbox
 EOF
 
 # Hide unnecessary first-boot services; do not disable networking or audio.
