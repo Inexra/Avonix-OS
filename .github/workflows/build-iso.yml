@@ -35,6 +35,7 @@ jobs:
             debian:trixie-slim bash -euxo pipefail -c '
               apt-get update
               apt-get install -y --no-install-recommends live-build ca-certificates curl gnupg xz-utils
+              chmod +x config/hooks/normal/*.hook.chroot
               lb config \
                 --mode debian \
                 --distribution trixie \
