@@ -21,24 +21,35 @@ export PATH="$JAVA_HOME/bin:$PATH"
 EOF
 chmod 0644 /etc/profile.d/avonix-java.sh
 
-# Download official x86_64 Debian packages / AppImages from project release APIs.
-# Thorium's SSE4 package is appropriate for the target Pentium 3825U class of CPU.
-THORIUM_URL="$(curl -fsSL https://api.github.com/repos/gz83/thorium/releases/latest | jq -r '[.assets[].browser_download_url | select(test("thorium-browser_[^/]+_SSE4\\.deb$"))][0] // empty')"
+# Install desktop applications when their upstream downloads are reachable.
+# External release APIs can rate-limit CI; optional apps must never break the whole ISO.
+GH_HEADERS=(-H 'Accept: application/vnd.github+json' -H 'User-Agent: Avonix-OS-build')
+
+THORIUM_URL="$(curl -fsSL --retry 2 --retry-delay 2 "${GH_HEADERS[@]}" https://api.github.com/repos/gz83/thorium/releases/latest 2>/dev/null | jq -r '[.assets[].browser_download_url | select(test("thorium-browser_[^/]+_SSE4\\.deb$"))][0] // empty' 2>/dev/null || true)"
 if [ -n "$THORIUM_URL" ]; then
-  curl -fL --retry 3 "$THORIUM_URL" -o "$JDK_TMP/thorium.deb"
-  apt-get install -y --no-install-recommends "$JDK_TMP/thorium.deb" || apt-get -f install -y --no-install-recommends
+  if curl -fL --retry 2 "$THORIUM_URL" -o "$JDK_TMP/thorium.deb"; then
+    apt-get install -y --no-install-recommends "$JDK_TMP/thorium.deb" || apt-get -f install -y --no-install-recommends
+  else
+    echo "WARNING: Thorium download failed; continuing without Thorium." >&2
+  fi
+else
+  echo "WARNING: Thorium release API unavailable; continuing without Thorium." >&2
 fi
 
 install_appimage() {
   local repo="$1" prefix="$2" label="$3" icon="$4"
   local url path
-  url="$(curl -fsSL "https://api.github.com/repos/$repo/releases/latest" | jq -r --arg prefix "$prefix" '[.assets[].browser_download_url | select(test($prefix + "-[0-9].*-linux-x86_64\\.AppImage$"))][0] // empty')"
+  url="$(curl -fsSL --retry 2 --retry-delay 2 "${GH_HEADERS[@]}" "https://api.github.com/repos/$repo/releases/latest" 2>/dev/null | jq -r --arg prefix "$prefix" '[.assets[].browser_download_url | select(test($prefix + "-[0-9].*-linux-x86_64\\.AppImage$"))][0] // empty' 2>/dev/null || true)"
   if [ -z "$url" ]; then
-    echo "ERROR: No x86_64 AppImage found for $repo" >&2
-    return 1
+    echo "WARNING: No reachable matching release for $repo; skipping $label." >&2
+    return 0
   fi
   path="/opt/avonix/$prefix.AppImage"
-  curl -fL --retry 3 "$url" -o "$path"
+  if ! curl -fL --retry 2 "$url" -o "$path"; then
+    echo "WARNING: Could not download $label; skipping it." >&2
+    rm -f "$path"
+    return 0
+  fi
   chmod 0755 "$path"
   cat > "/usr/local/share/applications/$prefix.desktop" <<EOF
 [Desktop Entry]
@@ -57,21 +68,26 @@ install_appimage storytold/wordcraft wordcraft WordCraft applications-office
 install_appimage storytold/deckcraft deckcraft DeckCraft applications-presentation
 install_appimage storytold/soundcraft soundcraft SoundCraft applications-multimedia
 
-# BlueJ is fetched from its official download page. Use the latest stable Linux .deb
-# link published there, and let apt resolve runtime dependencies.
+# BlueJ's download site may block automated CI requests. Try it, but do not abort
+# the entire OS build if the site or its .deb link is unavailable.
 BLUEJ_PAGE="$JDK_TMP/bluej.html"
-curl -fL --retry 3 https://www.bluej.org/download/download.html -o "$BLUEJ_PAGE"
-BLUEJ_URL="$(grep -Eo 'https?://[^" ]+\.deb|href="[^"]+\.deb' "$BLUEJ_PAGE" | sed -E 's/^href="//; s/&amp;/\&/g' | grep -Ei 'bluej.*(linux|amd64|\.deb)|\.deb' | head -n1 || true)"
-if [ -z "$BLUEJ_URL" ]; then
-  BLUEJ_URL="$(grep -Eo 'href="[^"]+\.deb' "$BLUEJ_PAGE" | sed 's/^href="//' | head -n1 || true)"
-fi
-if [ -n "$BLUEJ_URL" ]; then
-  case "$BLUEJ_URL" in http*) ;; *) BLUEJ_URL="https://www.bluej.org$BLUEJ_URL" ;; esac
-  curl -fL --retry 3 "$BLUEJ_URL" -o "$JDK_TMP/bluej.deb"
-  apt-get install -y --no-install-recommends "$JDK_TMP/bluej.deb" || apt-get -f install -y --no-install-recommends
+if curl -fL --retry 2 -A 'Mozilla/5.0 Avonix-OS-build' https://www.bluej.org/download/download.html -o "$BLUEJ_PAGE" 2>/dev/null; then
+  BLUEJ_URL="$(grep -Eo 'https?://[^" ]+\\.deb|href="[^"]+\\.deb' "$BLUEJ_PAGE" | sed -E 's/^href="//; s/&amp;/\\&/g' | grep -Ei 'bluej.*(linux|amd64|\\.deb)|\\.deb' | head -n1 || true)"
+  if [ -z "$BLUEJ_URL" ]; then
+    BLUEJ_URL="$(grep -Eo 'href="[^"]+\\.deb' "$BLUEJ_PAGE" | sed 's/^href="//' | head -n1 || true)"
+  fi
+  if [ -n "$BLUEJ_URL" ]; then
+    case "$BLUEJ_URL" in http*) ;; *) BLUEJ_URL="https://www.bluej.org$BLUEJ_URL" ;; esac
+    if curl -fL --retry 2 "$BLUEJ_URL" -o "$JDK_TMP/bluej.deb"; then
+      apt-get install -y --no-install-recommends "$JDK_TMP/bluej.deb" || apt-get -f install -y --no-install-recommends
+    else
+      echo "WARNING: BlueJ package download failed; continuing without BlueJ." >&2
+    fi
+  else
+    echo "WARNING: Could not find a BlueJ .deb link; continuing without BlueJ." >&2
+  fi
 else
-  echo "BlueJ download URL could not be safely discovered; keeping build diagnosable." >&2
-  exit 1
+  echo "WARNING: BlueJ download page blocked/unavailable; continuing without BlueJ." >&2
 fi
 
 # Ensure desktop integration and dark/light GTK settings are available for all users.
