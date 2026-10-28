@@ -1,0 +1,206 @@
+#!/bin/bash
+set -euo pipefail
+
+# Install latest stable Eclipse Temurin JDK 25 (x86_64) from Adoptium.
+install -d /opt/avonix /usr/local/share/applications /usr/local/bin /usr/share/backgrounds
+JDK_TMP="$(mktemp -d)"
+trap 'rm -rf "$JDK_TMP"' EXIT
+curl -fL --retry 3 --retry-delay 2 \
+  'https://api.adoptium.net/v3/binary/latest/25/ga/linux/x64/jdk/hotspot/normal/eclipse' \
+  -o "$JDK_TMP/temurin-jdk.tar.gz"
+tar -xzf "$JDK_TMP/temurin-jdk.tar.gz" -C /opt/avonix
+JDK_DIR="$(find /opt/avonix -maxdepth 1 -type d -name 'jdk-*' -print -quit)"
+test -n "$JDK_DIR"
+ln -sfn "$JDK_DIR" /opt/avonix/java
+ln -sfn /opt/avonix/java/bin/java /usr/local/bin/java
+ln -sfn /opt/avonix/java/bin/javac /usr/local/bin/javac
+ln -sfn /opt/avonix/java/bin/jar /usr/local/bin/jar
+cat > /etc/profile.d/avonix-java.sh <<'EOF'
+export JAVA_HOME=/opt/avonix/java
+export PATH="$JAVA_HOME/bin:$PATH"
+EOF
+chmod 0644 /etc/profile.d/avonix-java.sh
+
+# Download official x86_64 Debian packages / AppImages from project release APIs.
+# Thorium's SSE4 package is appropriate for the target Pentium 3825U class of CPU.
+THORIUM_URL="$(curl -fsSL https://api.github.com/repos/gz83/thorium/releases/latest | jq -r '[.assets[].browser_download_url | select(test("thorium-browser_[^/]+_SSE4\\.deb$"))][0] // empty')"
+if [ -n "$THORIUM_URL" ]; then
+  curl -fL --retry 3 "$THORIUM_URL" -o "$JDK_TMP/thorium.deb"
+  apt-get install -y --no-install-recommends "$JDK_TMP/thorium.deb" || apt-get -f install -y --no-install-recommends
+fi
+
+install_appimage() {
+  local repo="$1" prefix="$2" label="$3" icon="$4"
+  local url path
+  url="$(curl -fsSL "https://api.github.com/repos/$repo/releases/latest" | jq -r --arg prefix "$prefix" '[.assets[].browser_download_url | select(test($prefix + "-[0-9].*-linux-x86_64\\.AppImage$"))][0] // empty')"
+  if [ -z "$url" ]; then
+    echo "ERROR: No x86_64 AppImage found for $repo" >&2
+    return 1
+  fi
+  path="/opt/avonix/$prefix.AppImage"
+  curl -fL --retry 3 "$url" -o "$path"
+  chmod 0755 "$path"
+  cat > "/usr/local/share/applications/$prefix.desktop" <<EOF
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=$label
+Comment=$label desktop application
+Exec=$path %F
+Icon=$icon
+Terminal=false
+Categories=Office;
+StartupNotify=true
+EOF
+}
+install_appimage storytold/wordcraft wordcraft WordCraft applications-office
+install_appimage storytold/deckcraft deckcraft DeckCraft applications-presentation
+install_appimage storytold/soundcraft soundcraft SoundCraft applications-multimedia
+
+# BlueJ is fetched from its official download page. Use the latest stable Linux .deb
+# link published there, and let apt resolve runtime dependencies.
+BLUEJ_PAGE="$JDK_TMP/bluej.html"
+curl -fL --retry 3 https://www.bluej.org/download/download.html -o "$BLUEJ_PAGE"
+BLUEJ_URL="$(grep -Eo 'https?://[^" ]+\.deb|href="[^"]+\.deb' "$BLUEJ_PAGE" | sed -E 's/^href="//; s/&amp;/\&/g' | grep -Ei 'bluej.*(linux|amd64|\.deb)|\.deb' | head -n1 || true)"
+if [ -z "$BLUEJ_URL" ]; then
+  BLUEJ_URL="$(grep -Eo 'href="[^"]+\.deb' "$BLUEJ_PAGE" | sed 's/^href="//' | head -n1 || true)"
+fi
+if [ -n "$BLUEJ_URL" ]; then
+  case "$BLUEJ_URL" in http*) ;; *) BLUEJ_URL="https://www.bluej.org$BLUEJ_URL" ;; esac
+  curl -fL --retry 3 "$BLUEJ_URL" -o "$JDK_TMP/bluej.deb"
+  apt-get install -y --no-install-recommends "$JDK_TMP/bluej.deb" || apt-get -f install -y --no-install-recommends
+else
+  echo "BlueJ download URL could not be safely discovered; keeping build diagnosable." >&2
+  exit 1
+fi
+
+# Ensure desktop integration and dark/light GTK settings are available for all users.
+mkdir -p /etc/skel/.config/openbox /etc/skel/.config/tint2 /etc/skel/.config/rofi /etc/skel/.config/gtk-3.0
+cat > /usr/share/backgrounds/avonix-wallpaper.svg <<'EOF'
+<svg xmlns="http://www.w3.org/2000/svg" width="1920" height="1080" viewBox="0 0 1920 1080">
+<defs>
+ <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#071426"/><stop offset=".52" stop-color="#10294b"/><stop offset="1" stop-color="#351b60"/></linearGradient>
+ <linearGradient id="glow"><stop stop-color="#27d7e8" stop-opacity=".75"/><stop offset="1" stop-color="#9271ff" stop-opacity=".12"/></linearGradient>
+ <radialGradient id="orb"><stop stop-color="#51dfff" stop-opacity=".32"/><stop offset="1" stop-color="#51dfff" stop-opacity="0"/></radialGradient>
+</defs>
+<rect width="1920" height="1080" fill="url(#bg)"/>
+<circle cx="1450" cy="280" r="620" fill="url(#orb)"/>
+<path d="M-100 760 C 340 500, 650 1080, 1050 770 S 1650 430, 2040 620" fill="none" stroke="url(#glow)" stroke-width="170" opacity=".22"/>
+<path d="M-100 900 C 380 650, 650 1120, 1080 850 S 1670 570, 2040 750" fill="none" stroke="#78e8ff" stroke-width="2" opacity=".45"/>
+<text x="150" y="440" fill="#f3f7ff" font-family="DejaVu Sans, sans-serif" font-size="94" font-weight="bold" letter-spacing="10">AVONIX</text>
+<text x="158" y="510" fill="#a7c7ec" font-family="DejaVu Sans, sans-serif" font-size="27" letter-spacing="8">LIGHT ON RESOURCES. READY FOR WORK.</text>
+</svg>
+EOF
+rsvg-convert -o /usr/share/backgrounds/avonix-wallpaper.png /usr/share/backgrounds/avonix-wallpaper.svg
+
+cat > /etc/skel/.config/openbox/autostart <<'EOF'
+#!/bin/sh
+feh --no-fehbg --bg-fill /usr/share/backgrounds/avonix-wallpaper.png &
+picom --backend xrender --vsync --shadow --shadow-radius 10 --shadow-opacity 0.20 --fading --fade-in-step 0.08 --fade-out-step 0.08 &
+tint2 &
+EOF
+chmod +x /etc/skel/.config/openbox/autostart
+
+cat > /etc/skel/.config/openbox/rc.xml <<'EOF'
+<?xml version="1.0" encoding="UTF-8"?>
+<openbox_config xmlns="http://openbox.org/3.4/rc">
+ <resistance><strength>10</strength></resistance>
+ <focus><focusNew>yes</focusNew><followMouse>no</followMouse><focusLast>yes</focusLast><underMouse>no</underMouse><focusDelay>200</focusDelay><raiseOnFocus>no</raiseOnFocus></focus>
+ <placement><policy>Smart</policy><center>yes</center><monitor>Primary</monitor><primaryMonitor>1</primaryMonitor></placement>
+ <theme><name>Clearlooks</name><titleLayout>NLIMC</titleLayout><keepBorder>yes</keepBorder><animateIconify>yes</animateIconify><font place="ActiveWindow"><name>DejaVu Sans</name><size>10</size><weight>Bold</weight><slant>Normal</slant></font><font place="InactiveWindow"><name>DejaVu Sans</name><size>10</size><weight>Normal</weight><slant>Normal</slant></font></theme>
+ <desktops><number>2</number><firstdesk>1</firstdesk><names><name>Workspace 1</name><name>Workspace 2</name></names></desktops>
+ <keyboard>
+  <keybind key="W-space"><action name="Execute"><command>rofi -show drun</command></action></keybind>
+  <keybind key="W-e"><action name="Execute"><command>pcmanfm</command></action></keybind>
+  <keybind key="W-t"><action name="Execute"><command>lxterminal</command></action></keybind>
+  <keybind key="W-r"><action name="Execute"><command>rofi -show run</command></action></keybind>
+  <keybind key="W-d"><action name="ToggleShowDesktop"/></keybind>
+  <keybind key="A-F4"><action name="Close"/></keybind>
+ </keyboard>
+</openbox_config>
+EOF
+
+cat > /etc/skel/.config/tint2/tint2rc <<'EOF'
+panel_items = TSC
+panel_monitor = all
+panel_position = bottom center horizontal
+panel_size = 96% 38
+panel_margin = 0 8
+panel_padding = 8 4 8
+panel_background_id = 1
+wm_menu = 1
+panel_dock = 0
+panel_layer = top
+strut_policy = follow_size
+taskbar_mode = single_desktop
+taskbar_padding = 4 2 4
+taskbar_background_id = 0
+taskbar_active_background_id = 2
+taskbar_name = 0
+task_icon = 1
+task_text = 0
+task_maximum_size = 36 30
+task_centered = 1
+taskbar_sort_order = none
+systray_padding = 8 4 8
+systray_icon_size = 20
+clock_format = %a  %d %b   %H:%M
+clock_font = DejaVu Sans 10
+clock_padding = 8 0
+background_color = #101a2ce8
+rounded = 14
+border_width = 1
+border_color = #6ca8d933
+EOF
+
+cat > /etc/skel/.config/rofi/config.rasi <<'EOF'
+configuration {
+  modi: "drun,run,window";
+  show-icons: true;
+  font: "DejaVu Sans 11";
+  icon-theme: "Papirus-Dark";
+  display-drun: "Apps";
+  drun-display-format: "{name}";
+}
+* {
+  bg: #0d1727f2;
+  fg: #edf4ff;
+  accent: #62d7ed;
+  border-color: #537ba9;
+  background-color: @bg;
+  text-color: @fg;
+}
+window { width: 42%; border: 1px; border-color: @border-color; border-radius: 16px; padding: 18px; }
+mainbox { spacing: 12px; }
+inputbar { children: [prompt, entry]; spacing: 10px; padding: 10px; border-radius: 10px; }
+prompt { text-color: @accent; }
+listview { lines: 8; spacing: 5px; }
+element { padding: 9px; border-radius: 8px; }
+element selected { background-color: #24496b; text-color: #ffffff; }
+EOF
+
+cat > /etc/skel/.config/gtk-3.0/settings.ini <<'EOF'
+[Settings]
+gtk-theme-name=Adwaita-dark
+gtk-icon-theme-name=Papirus-Dark
+gtk-font-name=DejaVu Sans 10
+gtk-application-prefer-dark-theme=1
+gtk-enable-animations=1
+EOF
+
+# Configure compressed RAM swap without needing a large swap partition.
+if [ -f /etc/default/zramswap ]; then
+  sed -i 's/^#\?ALGO=.*/ALGO=zstd/' /etc/default/zramswap
+  sed -i 's/^#\?PERCENT=.*/PERCENT=50/' /etc/default/zramswap
+fi
+
+# Set a friendly display-manager default.
+mkdir -p /etc/lightdm/lightdm.conf.d
+cat > /etc/lightdm/lightdm.conf.d/20-avonix.conf <<'EOF'
+[Seat:*]
+user-session=openbox
+greeter-session=lightdm-gtk-greeter
+EOF
+
+# Hide unnecessary first-boot services; do not disable networking or audio.
+systemctl disable apt-daily.service apt-daily.timer apt-daily-upgrade.timer 2>/dev/null || true
