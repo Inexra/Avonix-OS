@@ -1,0 +1,83 @@
+name: Build Avonix-OS ISO
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - 'config/**'
+      - '.github/workflows/build-iso.yml'
+      - 'README.md'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: avonix-os-iso
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build bootable Avonix-OS Live ISO
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Build Debian Live image
+        run: |
+          set -eux
+          docker run --privileged --rm \
+            -v "$GITHUB_WORKSPACE:/work" \
+            -w /work \
+            -e DEBIAN_FRONTEND=noninteractive \
+            debian:trixie-slim bash -euxo pipefail -c '
+              apt-get update
+              apt-get install -y --no-install-recommends live-build ca-certificates curl gnupg xz-utils
+              lb config \
+                --mode debian \
+                --distribution trixie \
+                --architectures amd64 \
+                --binary-images iso-hybrid \
+                --archive-areas "main contrib non-free non-free-firmware" \
+                --debian-installer false \
+                --bootappend-live "boot=live components quiet splash username=avonix" \
+                --apt-recommends false \
+                --firmware-chroot true \
+                --firmware-binary true
+              lb build
+            '
+
+      - name: Rename ISO
+        if: success()
+        run: |
+          set -eux
+          ISO="$(find . -maxdepth 1 -type f -name '*.iso' -print -quit)"
+          test -n "$ISO"
+          mv "$ISO" Avonix-OS-amd64.iso
+          sha256sum Avonix-OS-amd64.iso > Avonix-OS-amd64.iso.sha256
+
+      - name: Upload ISO artifact
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Avonix-OS-ISO
+          path: |
+            Avonix-OS-amd64.iso
+            Avonix-OS-amd64.iso.sha256
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14
+
+      - name: Upload build logs if build fails
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: avonix-build-logs
+          path: |
+            build.log
+            live-build.log
+            config/
+          if-no-files-found: ignore
+          retention-days: 7
